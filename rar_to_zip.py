@@ -35,6 +35,11 @@ def convert_rar_to_zip(rar_path):
                         zf.write(full_path, arcname=rel_path)
 
             print(f"[DONE] 変換完了: {zip_path}")
+
+        # 元のRARファイルを削除
+        os.remove(rar_path)
+        print(f"[CLEANUP] 削除済み: {rar_path}")
+
     except Exception as e:
         print(f"[ERROR] {rar_path} の変換に失敗しました: {e}")
 
