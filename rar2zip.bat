@@ -6,6 +6,11 @@ rem ===== 設定 =====
 rem 元ファイル削除設定（1=削除する、0=削除しない）
 set "DELETE_ORIGINAL=1"
 
+rem フォルダD&D時の動作モード設定
+rem   RAR   = フォルダ内のRARファイルを検索してZIPに変換
+rem   FOLDER = フォルダそのものを無圧縮ZIPに圧縮
+set "FOLDER_MODE=FOLDER"
+
 rem ===== 7z.exe の場所を探す（Scoop版を最優先）=====
 set "SEVENZIP="
 set "SCOOP_7ZIP=C:\Users\end\scoop\apps\7zip\current\7z.exe"
@@ -51,17 +56,25 @@ goto found_7z
 :found_7z
 if "%~1"=="" (
     echo ============================================================
-    echo RAR → ZIP 変換ツール（高速版・元ファイル削除対応）
+    echo 多機能ZIP変換ツール（高速版・元ファイル削除対応）
     echo ============================================================
     echo 使用する7-Zip: "%SEVENZIP%"
     echo 圧縮設定: 無圧縮（最高速度優先）
-    if "%DELETE_ORIGINAL%"=="1" (
-        echo 元ファイル削除: 有効（変換成功後に元RARファイルを完全削除）
-        echo   - 単一RAR: 元ファイルを削除
-        echo   - 分割RAR: すべてのパートファイルを削除
-        echo   - 旧形式分割: .r00, .r01等も含めて削除
+    echo.
+    echo [モード設定] FOLDER_MODE=%FOLDER_MODE%
+    if /I "%FOLDER_MODE%"=="FOLDER" (
+        echo   → フォルダD^&D時: フォルダごとZIPに圧縮
     ) else (
-        echo 元ファイル削除: 無効
+        echo   → フォルダD^&D時: フォルダ内のRARを検索して変換
+    )
+    echo   ※ RARファイルD^&D時: 常にRAR→ZIP変換
+    echo.
+    if "%DELETE_ORIGINAL%"=="1" (
+        echo 元ファイル/フォルダ削除: 有効（変換成功後に完全削除）
+        echo   - RAR変換時: 元RARファイルを削除（分割RAR対応）
+        echo   - フォルダ圧縮時: 元フォルダを削除
+    ) else (
+        echo 元ファイル/フォルダ削除: 無効
     )
     echo.
     echo 使用方法：
@@ -69,14 +82,16 @@ if "%~1"=="" (
     echo.
     echo 重要な注意事項：
     echo   - 削除はゴミ箱に入らず完全削除されます
-    echo   - 変換が成功した場合のみ削除を実行します
-    echo   - 削除を無効にする場合は、ファイル先頭のDELETE_ORIGINAL=0に変更
+    echo   - 変換/圧縮が成功した場合のみ削除を実行します
+    echo   - 削除を無効にする場合は DELETE_ORIGINAL=0 に変更
+    echo   - フォルダD^&D時の動作は FOLDER_MODE で切り替え可能
     echo ============================================================
     pause
     exit /b 0
 )
 
 echo 使用する7-Zip: "%SEVENZIP%"
+echo フォルダモード: %FOLDER_MODE%
 if "%DELETE_ORIGINAL%"=="1" (
     echo 元ファイル削除: 有効
 ) else (
@@ -88,21 +103,128 @@ echo.
 :processArg
 if "%~1"=="" goto end_process
 
-if exist "%~1\NUL" (
-    echo [フォルダ処理] 内部のRARファイルを検索: "%~1"
-    for /r "%~1" %%F in (*.rar) do call :convert "%%~fF"
+rem ドラッグ&ドロップ時の引数を正規化（末尾\や引用符の問題を回避）
+set "ARG=%~1"
+
+rem 末尾のバックスラッシュを除去（フォルダD&D時に付くことがある）
+if "!ARG:~-1!"=="\" set "ARG=!ARG:~0,-1!"
+
+echo [デバッグ] 処理対象: "!ARG!"
+
+rem フォルダ判定（末尾\除去済みのパスで判定）
+if exist "!ARG!\*" (
+    echo [判定] フォルダとして認識
+    if /I "%FOLDER_MODE%"=="FOLDER" (
+        call :zip_folder "!ARG!"
+    ) else (
+        echo [フォルダ処理] 内部のRARファイルを検索: "!ARG!"
+        for /r "!ARG!" %%F in (*.rar) do call :convert "%%~fF"
+    )
+) else if exist "!ARG!" (
+    echo [判定] ファイルとして認識
+    call :convert "!ARG!"
 ) else (
-    call :convert "%~1"
+    echo [スキップ] パスが見つかりません: "!ARG!"
 )
 
 shift
 goto processArg
 
 :end_process
+echo.
+echo 全ての処理が完了しました。
+pause
 exit /b 0
 
+rem ================================================================
+rem  フォルダ → 無圧縮ZIP 変換処理
+rem ================================================================
+:zip_folder
+setlocal enabledelayedexpansion
+set "FOLDER_PATH=%~1"
+
+rem 末尾のバックスラッシュを除去（念のため再度）
+if "!FOLDER_PATH:~-1!"=="\" set "FOLDER_PATH=!FOLDER_PATH:~0,-1!"
+
+rem フォルダ名と親ディレクトリをパスから取得
+for %%F in ("!FOLDER_PATH!") do (
+    set "FOLDER_NAME=%%~nxF"
+    set "PARENT_DIR=%%~dpF"
+)
+
+set "ZIP=!PARENT_DIR!!FOLDER_NAME!.zip"
+
+echo ==============================================================
+echo [フォルダ圧縮開始] "!FOLDER_NAME!"
+echo 対象フォルダ: "!FOLDER_PATH!"
+echo 出力先: "!ZIP!"
+echo ==============================================================
+
+rem フォルダが空でないか確認
+dir /b /a "!FOLDER_PATH!" >nul 2>&1
+if errorlevel 1 (
+    echo [スキップ] フォルダが空です: "!FOLDER_PATH!"
+    goto zip_folder_end
+)
+
+rem 既存のZIPファイルを削除
+if exist "!ZIP!" (
+    echo [準備] 既存のZIPファイルを削除
+    del /f /q "!ZIP!" >nul 2>&1
+    if exist "!ZIP!" (
+        echo [エラー] 既存のZIPファイルを削除できません（使用中？）: "!ZIP!"
+        goto zip_folder_end
+    )
+)
+
+rem ZIP作成（無圧縮・最高速度）
+echo [1/3] ZIP作成中...（無圧縮・最高速度）
+"!SEVENZIP!" a -tzip -mx=0 -mmt=on -y -bso0 -bse1 -- "!ZIP!" "!FOLDER_PATH!\*"
+if errorlevel 1 (
+    echo [エラー] ZIP作成に失敗: "!ZIP!"
+    goto zip_folder_end
+)
+
+rem ZIP整合性チェック
+echo [2/3] ZIP整合性チェック中...
+"!SEVENZIP!" t "!ZIP!" >nul 2>&1
+if errorlevel 1 (
+    echo [エラー] ZIPの整合性チェックに失敗しました。元フォルダは保持します。
+    del /f /q "!ZIP!" >nul 2>&1
+    goto zip_folder_end
+)
+
+rem ファイルサイズ表示
+for %%A in ("!ZIP!") do set "ZIP_SIZE=%%~zA"
+echo [圧縮完了] 圧縮が正常に完了しました（整合性チェック済み）
+echo   ZIPサイズ: !ZIP_SIZE! bytes
+
+rem 元フォルダ削除
+if "%DELETE_ORIGINAL%"=="1" (
+    echo [3/3] 元フォルダ削除処理中...
+    rd /s /q "!FOLDER_PATH!" >nul 2>&1
+    if exist "!FOLDER_PATH!" (
+        echo   [警告] フォルダの完全削除に失敗しました: "!FOLDER_PATH!"
+        echo   一部のファイルがロックされている可能性があります
+    ) else (
+        echo   削除: "!FOLDER_PATH!"
+    )
+) else (
+    echo [3/3] 元フォルダ削除: スキップ（設定により無効）
+)
+
+echo ==============================================================
+echo.
+
+:zip_folder_end
+endlocal
+exit /b 0
+
+rem ================================================================
+rem  RAR → ZIP 変換処理
+rem ================================================================
 :convert
-setlocal
+setlocal enabledelayedexpansion
 set "SRC=%~1"
 if not exist "%SRC%" (
     echo [スキップ] ファイルが見つかりません: "%SRC%"
@@ -116,9 +238,10 @@ if /I not "%~x1"==".rar" (
 rem 分割RARの後続ボリューム（part2以降）はスキップ
 set "NAME=%~n1"
 set "IS_SPLIT=0"
-echo "%NAME%" | findstr /I /C:".part" >nul
+echo "%NAME%" | findstr /I /R "\.part[0-9][0-9]*$" >nul
 if not errorlevel 1 (
-    echo "%NAME%" | findstr /I /C:".part1" >nul
+    rem .partN 形式のファイル名を検出 → part1（またはpart01, part001等）のみ処理
+    echo "%NAME%" | findstr /I /R "\.part0*1$" >nul
     if errorlevel 1 (
         echo [スキップ] 分割RARの後続ボリューム: "%SRC%"
         goto convert_end
@@ -153,7 +276,7 @@ if errorlevel 1 (
 )
 
 rem RAR展開
-echo [1/4] RAR展開中...
+echo [1/5] RAR展開中...
 "%SEVENZIP%" x -y -bso0 -bse1 -o"%TMP%" -- "%SRC%"
 if errorlevel 1 (
     echo [エラー] RAR展開に失敗: "%SRC%"
@@ -168,7 +291,7 @@ if exist "%ZIP%" (
 )
 
 rem ZIP作成（最高速設定）
-echo [2/4] ZIP作成中...（無圧縮・最高速度）
+echo [2/5] ZIP作成中...（無圧縮・最高速度）
 "%SEVENZIP%" a -tzip -mx=0 -mmt=on -y -bso0 -bse1 -- "%ZIP%" "%TMP%\*"
 if errorlevel 1 (
     echo [エラー] ZIP作成に失敗: "%ZIP%"
@@ -176,15 +299,25 @@ if errorlevel 1 (
     goto convert_end
 )
 
+rem ZIP整合性チェック
+echo [3/5] ZIP整合性チェック中...
+"%SEVENZIP%" t "%ZIP%" >nul 2>&1
+if errorlevel 1 (
+    echo [エラー] ZIPの整合性チェックに失敗しました。元ファイルは保持します。
+    del /f /q "%ZIP%" >nul 2>&1
+    rd /s /q "%TMP%" >nul 2>&1
+    goto convert_end
+)
+
 rem 一時ファイル削除
-echo [3/4] 一時ファイル削除中...
+echo [4/5] 一時ファイル削除中...
 rd /s /q "%TMP%" >nul 2>&1
 
 rem ファイルサイズ比較表示
 for %%A in ("%SRC%") do set "RAR_SIZE=%%~zA"
 for %%A in ("%ZIP%") do set "ZIP_SIZE=%%~zA"
 
-echo [変換完了] 変換が正常に完了しました
+echo [変換完了] 変換が正常に完了しました（整合性チェック済み）
 echo   元RARサイズ: !RAR_SIZE! bytes
 echo   新ZIPサイズ: !ZIP_SIZE! bytes
 if !ZIP_SIZE! GTR !RAR_SIZE! (
@@ -193,10 +326,10 @@ if !ZIP_SIZE! GTR !RAR_SIZE! (
 
 rem 変換成功時のみ元ファイル削除
 if "%DELETE_ORIGINAL%"=="1" (
-    echo [4/4] 元ファイル削除処理中...
+    echo [5/5] 元ファイル削除処理中...
     call :delete_source "%SRC%" "!IS_SPLIT!"
 ) else (
-    echo [4/4] 元ファイル削除: スキップ（設定により無効）
+    echo [5/5] 元ファイル削除: スキップ（設定により無効）
 )
 
 echo ==============================================================
